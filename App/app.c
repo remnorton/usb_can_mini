@@ -58,6 +58,13 @@ void app_step()
 	handle_usb_tx();
 	handle_can();
 	handle_leds();
+
+	if (hcan1.ErrorCode)
+	{
+		HAL_CAN_DeInit(&hcan1);
+		HAL_CAN_Init(&hcan1);
+		HAL_CAN_Start(&hcan1);
+	}
 }
 
 void usb_rx(uint8_t* Buf, uint32_t *Len)
