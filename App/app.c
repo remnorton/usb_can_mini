@@ -8,8 +8,9 @@
 #include "usbd_def.h"
 #include "usbd_cdc_if.h"
 #include "proto.h"
+#include "list.h"
 
-#define USB_RX_BUF_SIZE	128
+#define USB_RX_BUF_SIZE	1024
 #define USB_TX_BUF_SIZE	512
 #define LED_DURATION	5
 
@@ -25,6 +26,7 @@ static uint8_t usb_rx_buf[USB_RX_BUF_SIZE];
 static uint8_t usb_tx_buf[USB_TX_BUF_SIZE];
 static uint8_t can_started = 0;
 static uint8_t*	core_uid = (uint8_t*)UID_BASE;
+static List_t* can_tx_list = 0;
 
 static const uint8_t prescaler[CAN_BAUD_END] = {0, 40, 32, 20, 16, 10, 8, 5, 4};
 
@@ -36,6 +38,7 @@ void send_via_can(CAN_USB_Mess_t* mess);
 void send_via_usb(uint8_t* data, uint16_t len);
 void handle_usb_tx();
 void handle_usb_rx();
+void handle_can_tx();
 void parse_usb(CAN_USB_Header_t* hdr, uint8_t* payload);
 void handle_command(CAN_USB_Header_t* hdr, uint8_t* payload);
 void handle_request(CAN_USB_Header_t* hdr, uint8_t* payload);
@@ -49,6 +52,7 @@ void handle_leds();
 //
 void app_init()
 {
+	can_tx_list = list_create();
 	HAL_CAN_Start(&hcan1);
 }
 
@@ -56,6 +60,7 @@ void app_step()
 {
 	handle_usb_rx();
 	handle_usb_tx();
+	handle_can_tx();
 	handle_can();
 	handle_leds();
 
@@ -104,17 +109,7 @@ void start_can(uint8_t baud)
 void send_via_can(CAN_USB_Mess_t* mess)
 {
 	if (!can_started) return;
-	uint32_t mailbox = 0;
-	CAN_TxHeaderTypeDef hdr;
-	hdr.DLC = mess->dlc;
-	hdr.StdId = hdr.ExtId = 0;
-	hdr.RTR = mess->rtr?CAN_RTR_REMOTE:CAN_RTR_DATA;;
-	hdr.IDE = mess->ide?CAN_ID_EXT:CAN_ID_STD;;
-	hdr.TransmitGlobalTime = 0;
-	if (mess->ide) hdr.ExtId = mess->id;
-	else hdr.StdId = mess->id;
-	HAL_CAN_AddTxMessage(&hcan1, &hdr, mess->data, &mailbox);
-	tx_led_on();
+	list_append(can_tx_list, mess);
 }
 
 void send_via_usb(uint8_t* data, uint16_t len)
@@ -164,6 +159,30 @@ void handle_usb_tx()
 	else usb_tx_time = HAL_GetTick() + 5;
 }
 
+void handle_can_tx()
+{
+	if (!can_started) return;
+	if (list_is_empty(can_tx_list)) return;
+	List_item_t* item = list_get_item(can_tx_list, 0);
+	CAN_USB_Mess_t* mess = (CAN_USB_Mess_t*)item->data;
+
+	uint32_t mailbox = 0;
+	CAN_TxHeaderTypeDef hdr;
+	hdr.DLC = mess->dlc;
+	hdr.StdId = hdr.ExtId = 0;
+	hdr.RTR = mess->rtr?CAN_RTR_REMOTE:CAN_RTR_DATA;
+	hdr.IDE = mess->ide?CAN_ID_EXT:CAN_ID_STD;
+	hdr.TransmitGlobalTime = 0;
+	if (mess->ide) hdr.ExtId = mess->id;
+	else hdr.StdId = mess->id;
+	if (HAL_CAN_AddTxMessage(&hcan1, &hdr, mess->data, &mailbox) == HAL_OK)
+	{
+		tx_led_on();
+		list_remove_item(can_tx_list, item);
+		list_release_item(item);
+	}
+}
+
 void parse_usb(CAN_USB_Header_t* hdr, uint8_t* payload)
 {
 	if (hdr->datalen) handle_command(hdr, payload);
@@ -176,7 +195,8 @@ void handle_command(CAN_USB_Header_t* hdr, uint8_t* payload)
 	{
 		case CAN_PT_MESS:
 		{
-			CAN_USB_Mess_t* pl = (CAN_USB_Mess_t*)payload;
+			CAN_USB_Mess_t* pl = (CAN_USB_Mess_t*)malloc(sizeof(CAN_USB_Mess_t));
+			memcpy(pl, payload, sizeof(CAN_USB_Mess_t));
 			send_via_can(pl);
 			break;
 		}
