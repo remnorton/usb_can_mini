@@ -9,9 +9,7 @@
 #define APP_H_
 #include "board.h"
 
-extern uint32_t tx_off_time;
-extern uint32_t rx_off_time;
-extern uint32_t usb_off_time;
+#define CAN_BUF_SIZE			512
 
 void app_init();
 void app_step();

@@ -8,42 +8,47 @@
 #include "usbd_def.h"
 #include "usbd_cdc_if.h"
 #include "proto.h"
-#include "list.h"
+#include "used_libs.h"
 
-#define USB_RX_BUF_SIZE	1024
-#define USB_TX_BUF_SIZE	512
-#define LED_DURATION	5
+#define USB_RX_BUF_SIZE	256
+#define USB_TX_BUF_SIZE	2048
+
+#define LED_DURATION	1
 
 uint32_t tx_off_time = 0;
 uint32_t rx_off_time = 0;
-uint32_t usb_off_time = 0;
-uint32_t usb_tx_time = 0;
-
-uint16_t usb_rx_idx = 0;
-uint16_t usb_tx_idx = 0;
 
 static uint8_t usb_rx_buf[USB_RX_BUF_SIZE];
 static uint8_t usb_tx_buf[USB_TX_BUF_SIZE];
+static uint16_t usb_rx_head = 0;
+static uint16_t	usb_rx_tail = 0;
+static uint16_t usb_tx_idx = 0;
+
+static CAN_USB_Mess_t	can_tx_buf[CAN_BUF_SIZE];
+static uint16_t			can_tx_idx = 0;
+
+static CAN_USB_Mess_t	can_rx_buf[CAN_BUF_SIZE];
+static uint16_t			can_rx_idx = 0;
+
 static uint8_t can_started = 0;
 static uint8_t*	core_uid = (uint8_t*)UID_BASE;
-static List_t* can_tx_list = 0;
 
-static const uint8_t prescaler[CAN_BAUD_END] = {0, 40, 32, 20, 16, 10, 8, 5, 4};
+
+static const uint16_t prescaler[CAN_BAUD_END] = {0, 400, 200, 160, 80, 40, 32, 20, 16, 10, 8, 5, 4};
 
 //
 //Private forwards
 //
 void start_can(uint8_t baud);
 void send_via_can(CAN_USB_Mess_t* mess);
-void send_via_usb(uint8_t* data, uint16_t len);
+uint8_t send_via_usb(uint8_t* data, uint16_t len);
 void handle_usb_tx();
 void handle_usb_rx();
 void handle_can_tx();
 void parse_usb(CAN_USB_Header_t* hdr, uint8_t* payload);
 void handle_command(CAN_USB_Header_t* hdr, uint8_t* payload);
 void handle_request(CAN_USB_Header_t* hdr, uint8_t* payload);
-void handle_can();
-void usb_led_on();
+void handle_can_rx();
 void tx_led_on();
 void rx_led_on();
 void handle_leds();
@@ -52,16 +57,15 @@ void handle_leds();
 //
 void app_init()
 {
-	can_tx_list = list_create();
 	HAL_CAN_Start(&hcan1);
 }
 
-void app_step()
+FAST_RUN void app_step()
 {
 	handle_usb_rx();
 	handle_usb_tx();
 	handle_can_tx();
-	handle_can();
+	handle_can_rx();
 	handle_leds();
 
 	if (hcan1.ErrorCode)
@@ -72,27 +76,45 @@ void app_step()
 	}
 }
 
-void usb_rx(uint8_t* Buf, uint32_t *Len)
+FAST_RUN void usb_rx(uint8_t* Buf, uint32_t *Len)
 {
-	if ((*Len + usb_rx_idx) < USB_RX_BUF_SIZE)
+	uint16_t len1 = *Len;
+	uint16_t len2 = 0;
+
+	if (len1 >= USB_RX_BUF_SIZE)
+		return;
+
+	if ((len1 + usb_rx_head) >= USB_RX_BUF_SIZE)
 	{
-		memcpy(&usb_rx_buf[usb_rx_idx], Buf, *Len);
-		usb_rx_idx += *Len;
-		usb_led_on();
+		len1 = USB_RX_BUF_SIZE - usb_rx_head;
+		len2 = *Len - len1;
 	}
+
+	if (len1)
+		memcpy(&usb_rx_buf[usb_rx_head], Buf, len1);
+
+	if (len2)
+		memcpy(usb_rx_buf, &Buf[len1], len2);
+
+	usb_rx_head = ring_add(usb_rx_head, *Len, sizeof(usb_rx_buf));
 }
 
 //
 //Private members
 //
 
-void start_can(uint8_t baud)
+FAST_RUN void start_can(uint8_t baud)
 {
 	if (baud >= CAN_BAUD_END) return;
-	if ((baud == 0) && can_started) //stop CAN
+	if (baud == 0) //stop CAN
 	{
-		HAL_CAN_Stop(&hcan1);
-		can_started = 0;
+		if (can_started)
+		{
+			HAL_CAN_Stop(&hcan1);
+			can_started = 0;
+			HAL_GPIO_WritePin(USB_LED, GPIO_PIN_RESET);
+			HAL_CAN_DeactivateNotification(&hcan1, CAN_IT_RX_FIFO0_MSG_PENDING);
+		}
 	}
 	else
 	{
@@ -103,101 +125,114 @@ void start_can(uint8_t baud)
 		HAL_CAN_Init(&hcan1);
 		HAL_CAN_Start(&hcan1);
 		can_started = baud;
+		HAL_GPIO_WritePin(USB_LED, GPIO_PIN_SET);
+		HAL_CAN_ActivateNotification(&hcan1, CAN_IT_RX_FIFO0_MSG_PENDING);
 	}
 }
 
-void send_via_can(CAN_USB_Mess_t* mess)
+FAST_RUN void send_via_can(CAN_USB_Mess_t* mess)
 {
 	if (!can_started) return;
-	list_append(can_tx_list, mess);
+	if (can_tx_idx >= CAN_BUF_SIZE) return;
+	memcpy(&can_tx_buf[can_tx_idx++], mess, sizeof(CAN_USB_Mess_t));
 }
 
-void send_via_usb(uint8_t* data, uint16_t len)
+uint8_t send_via_usb(uint8_t* data, uint16_t len)
 {
-	if ((len+usb_tx_idx) < USB_RX_BUF_SIZE)
+	if ((len+usb_tx_idx) < USB_TX_BUF_SIZE)
 	{
 		memcpy(&usb_tx_buf[usb_tx_idx], data, len);
 		usb_tx_idx += len;
+		return 1;
 	}
+
+	return 0;
 }
 
-void handle_usb_rx()
+FAST_RUN void handle_usb_rx()
 {
-	uint16_t offs = 0;
-	while ((usb_rx_buf[offs] != _PREFIX_) && (offs < usb_rx_idx)) offs++;
+	uint16_t len = ring_len(usb_rx_head, usb_rx_tail, sizeof(usb_rx_buf));
+	if (len)
+		usb_rx_tail = ring_seek(usb_rx_head, usb_rx_tail, _PREFIX_, usb_rx_buf, sizeof(usb_rx_buf));
 
-	if (usb_rx_idx < (sizeof(CAN_USB_Header_t) + sizeof(crc_t)+offs)) return;
-
-	CAN_USB_Header_t* hdr = (CAN_USB_Header_t*)&usb_rx_buf[offs];
-	if (usb_rx_idx < (sizeof(CAN_USB_Header_t) + hdr->datalen + sizeof(crc_t)+offs)) //incomplette packet
+	len = ring_len(usb_rx_head, usb_rx_tail, sizeof(usb_rx_buf));
+	if (len < sizeof(CAN_USB_Header_t))
 		return;
 
-	crc_t* pcrc = (crc_t*)&usb_rx_buf[sizeof(CAN_USB_Header_t) + hdr->datalen + offs];
-	crc_t  crc = calc_crc(&usb_rx_buf[offs], sizeof(CAN_USB_Header_t) + hdr->datalen);
+	CAN_USB_Header_t hdr;
+	ring_extract((uint8_t*)&hdr, usb_rx_buf, usb_rx_tail, sizeof(CAN_USB_Header_t), sizeof(usb_rx_buf));
+	if (len < (sizeof(hdr) + hdr.datalen))
+		return;
 
-	if (*pcrc != crc) offs += 1;
-	else
+	if (hdr.datalen > 128)
 	{
-		parse_usb(hdr, &usb_rx_buf[sizeof(CAN_USB_Header_t)]);
-		offs += sizeof(CAN_USB_Header_t) + hdr->datalen + sizeof(crc_t);
+		usb_rx_tail = ring_add(usb_rx_tail, 1, sizeof(usb_rx_buf));
+		return;
 	}
 
-	memcpy(usb_rx_buf, &usb_rx_buf[offs], USB_RX_BUF_SIZE - offs);
-	usb_rx_idx -= offs;
+	uint8_t* payload = (uint8_t*)malloc(hdr.datalen);
+	if (!payload)
+		return;
+
+	usb_rx_tail = ring_add(usb_rx_tail, sizeof(hdr), sizeof(usb_rx_buf));
+	ring_extract(payload, usb_rx_buf, usb_rx_tail, hdr.datalen, sizeof(usb_rx_buf));
+
+	parse_usb(&hdr, payload);
+	usb_rx_tail = ring_add(usb_rx_tail, hdr.datalen, sizeof(usb_rx_buf));
+
+	free(payload);
 }
 
-void handle_usb_tx()
+FAST_RUN void handle_usb_tx()
 {
 	if (!usb_tx_idx) return;
-	if (usb_tx_time > HAL_GetTick()) return;
 	if (CDC_Transmit_FS(usb_tx_buf, usb_tx_idx) == USBD_OK)
-	{
 		usb_tx_idx = 0;
-		usb_tx_time = 0;
-		usb_led_on();
-	}
-	else usb_tx_time = HAL_GetTick() + 5;
+
 }
 
-void handle_can_tx()
+FAST_RUN void handle_can_tx()
 {
 	if (!can_started) return;
-	if (list_is_empty(can_tx_list)) return;
-	List_item_t* item = list_get_item(can_tx_list, 0);
-	CAN_USB_Mess_t* mess = (CAN_USB_Mess_t*)item->data;
 
-	uint32_t mailbox = 0;
-	CAN_TxHeaderTypeDef hdr;
-	hdr.DLC = mess->dlc;
-	hdr.StdId = hdr.ExtId = 0;
-	hdr.RTR = mess->rtr?CAN_RTR_REMOTE:CAN_RTR_DATA;
-	hdr.IDE = mess->ide?CAN_ID_EXT:CAN_ID_STD;
-	hdr.TransmitGlobalTime = 0;
-	if (mess->ide) hdr.ExtId = mess->id;
-	else hdr.StdId = mess->id;
-	if (HAL_CAN_AddTxMessage(&hcan1, &hdr, mess->data, &mailbox) == HAL_OK)
+	if (can_tx_idx)
 	{
-		tx_led_on();
-		list_remove_item(can_tx_list, item);
-		list_release_item(item);
+		if (HAL_CAN_GetTxMailboxesFreeLevel(&hcan1))
+		{
+			CAN_USB_Mess_t* mess = can_tx_buf;
+
+			uint32_t mailbox = 0;
+			CAN_TxHeaderTypeDef hdr;
+			hdr.DLC = mess->flags.dlc;
+			hdr.StdId = hdr.ExtId = 0;
+			hdr.RTR = mess->flags.rtr?CAN_RTR_REMOTE:CAN_RTR_DATA;
+			hdr.IDE = mess->flags.ide?CAN_ID_EXT:CAN_ID_STD;
+			hdr.TransmitGlobalTime = 0;
+			hdr.ExtId = hdr.StdId = mess->id;
+
+			if (HAL_CAN_AddTxMessage(&hcan1, &hdr, mess->data, &mailbox) == HAL_OK)
+			{
+				tx_led_on();
+				can_tx_idx--;
+				memcpy(can_tx_buf, &can_tx_buf[1], sizeof(can_tx_buf[0])*can_tx_idx);
+			}
+		}
 	}
 }
 
-void parse_usb(CAN_USB_Header_t* hdr, uint8_t* payload)
+FAST_RUN void parse_usb(CAN_USB_Header_t* hdr, uint8_t* payload)
 {
 	if (hdr->datalen) handle_command(hdr, payload);
 	handle_request(hdr, payload);
 }
 
-void handle_command(CAN_USB_Header_t* hdr, uint8_t* payload)
+FAST_RUN void handle_command(CAN_USB_Header_t* hdr, uint8_t* payload)
 {
 	switch(hdr->type)
 	{
 		case CAN_PT_MESS:
 		{
-			CAN_USB_Mess_t* pl = (CAN_USB_Mess_t*)malloc(sizeof(CAN_USB_Mess_t));
-			memcpy(pl, payload, sizeof(CAN_USB_Mess_t));
-			send_via_can(pl);
+			send_via_can((CAN_USB_Mess_t*)payload);
 			break;
 		}
 		case CAN_PT_FILTER:
@@ -206,7 +241,7 @@ void handle_command(CAN_USB_Header_t* hdr, uint8_t* payload)
 			CAN_USB_Filter_t* pl = (CAN_USB_Filter_t*)payload;
 			filter.FilterActivation = pl->FilterActivation;
 			filter.FilterBank = pl->FilterBank;
-			filter.FilterFIFOAssignment = pl->FilterFIFOAssignment;
+			filter.FilterFIFOAssignment = CAN_FILTER_FIFO0;
 			filter.FilterIdHigh = pl->FilterIdHigh;
 			filter.FilterIdLow = pl->FilterIdLow;
 			filter.FilterMaskIdHigh = pl->FilterMaskIdHigh;
@@ -226,7 +261,7 @@ void handle_command(CAN_USB_Header_t* hdr, uint8_t* payload)
 	}
 }
 
-void handle_request(CAN_USB_Header_t* hdr, uint8_t* payload)
+FAST_RUN void handle_request(CAN_USB_Header_t* hdr, uint8_t* payload)
 {
 	uint8_t tx_buf[256];
 	uint8_t len = 0;
@@ -236,17 +271,18 @@ void handle_request(CAN_USB_Header_t* hdr, uint8_t* payload)
 		case CAN_PT_FILTER:
 		{
 			CAN_USB_Filter_t fm;
-			CAN_FilterTypeDef filter;
-			fm.FilterActivation = filter.FilterActivation;
-			fm.FilterBank = filter.FilterBank;
-			fm.FilterFIFOAssignment = filter.FilterFIFOAssignment;
-			fm.FilterIdHigh = filter.FilterIdHigh;
-			fm.FilterIdLow = filter.FilterIdLow;
-			fm.FilterMaskIdHigh = filter.FilterMaskIdHigh;
-			fm.FilterMaskIdLow = filter.FilterMaskIdLow;
-			fm.FilterMode = filter.FilterMode;
-			fm.FilterScale = filter.FilterScale;
-			fm.SlaveStartFilterBank = filter.SlaveStartFilterBank;
+//			CAN_FilterTypeDef filter;
+//			fm.FilterActivation = filter.FilterActivation;
+//			fm.FilterBank = filter.FilterBank;
+//			fm.FilterFIFOAssignment = filter.FilterFIFOAssignment;
+//			fm.FilterIdHigh = filter.FilterIdHigh;
+//			fm.FilterIdLow = filter.FilterIdLow;
+//			fm.FilterMaskIdHigh = filter.FilterMaskIdHigh;
+//			fm.FilterMaskIdLow = filter.FilterMaskIdLow;
+//			fm.FilterMode = filter.FilterMode;
+//			fm.FilterScale = filter.FilterScale;
+//			fm.SlaveStartFilterBank = filter.SlaveStartFilterBank;
+			memset(&fm, 0, sizeof(fm));
 
 			len = make_usb_can_pck(CAN_PT_FILTER, &fm, sizeof(fm), tx_buf);
 
@@ -264,57 +300,64 @@ void handle_request(CAN_USB_Header_t* hdr, uint8_t* payload)
 		}
 	}
 
-	if(len) send_via_usb(tx_buf, len);
-}
-
-void handle_can()
-{
-	while(HAL_CAN_GetRxFifoFillLevel(&hcan1, CAN_RX_FIFO0))
-	{
-		CAN_RxHeaderTypeDef hdr;
-		CAN_USB_Mess_t mess;
-		memset(mess.data, 0, sizeof(mess.data));
-		if (HAL_CAN_GetRxMessage(&hcan1, CAN_RX_FIFO0, &hdr, mess.data) != HAL_OK) return;
-
-		rx_led_on();
-		mess.id = hdr.IDE?hdr.ExtId:hdr.StdId;
-		mess.ide = hdr.IDE;
-		mess.rtr = hdr.RTR;
-		mess.dlc = hdr.DLC;
-		mess.filter = hdr.FilterMatchIndex;
-
-		uint8_t tx_buf[256];
-		uint8_t len = make_usb_can_pck(CAN_PT_MESS, &mess, sizeof(mess), tx_buf);
+	if(len)
 		send_via_usb(tx_buf, len);
-	}
 }
 
-void usb_led_on()
+FAST_RUN void handle_can_rx()
 {
-	HAL_GPIO_WritePin(USB_LED, GPIO_PIN_SET);
-	usb_off_time = HAL_GetTick() + LED_DURATION;
+	if (can_rx_idx)
+	{
+		uint16_t idx = 0;
+		while ((idx < can_rx_idx) && ((usb_tx_idx + sizeof(CAN_USB_Mess_t)) < USB_TX_BUF_SIZE))
+		{
+			rx_led_on();
+			uint16_t len = make_usb_can_pck(CAN_PT_MESS, &can_rx_buf[idx], sizeof(CAN_USB_Mess_t), &usb_tx_buf[usb_tx_idx]);
+			idx++;
+			usb_tx_idx += len;
+		}
+
+		if (idx != can_rx_idx)
+		{
+			memcpy(can_rx_buf, &can_rx_buf[idx], can_rx_idx - idx);
+		}
+		can_rx_idx -= idx;
+	}
+//	uint8_t res = 1;
+//	while(HAL_CAN_GetRxFifoFillLevel(&hcan1, CAN_RX_FIFO0) && res)
+//	{
+//		CAN_RxHeaderTypeDef hdr;
+//		CAN_USB_Mess_t mess;
+//		memset(mess.data, 0, sizeof(mess.data));
+//		if (HAL_CAN_GetRxMessage(&hcan1, CAN_RX_FIFO0, &hdr, mess.data) != HAL_OK) return;
+//
+//		rx_led_on();
+//		mess.id = hdr.IDE?hdr.ExtId:hdr.StdId;
+//		mess.flags.ide = (hdr.IDE == CAN_ID_EXT)?1:0;
+//		mess.flags.rtr = (hdr.RTR == CAN_RTR_REMOTE)?1:0;
+//		mess.flags.dlc = hdr.DLC;
+//		mess.filter = hdr.FilterMatchIndex;
+//
+//		uint8_t tx_buf[64];
+//		uint8_t len = make_usb_can_pck(CAN_PT_MESS, &mess, sizeof(mess), tx_buf);
+//		res = send_via_usb(tx_buf, len);
+//	}
 }
 
-void tx_led_on()
+inline void tx_led_on()
 {
 	HAL_GPIO_WritePin(TX_LED, GPIO_PIN_SET);
 	tx_off_time = HAL_GetTick() + LED_DURATION;
 }
 
-void rx_led_on()
+inline void rx_led_on()
 {
 	HAL_GPIO_WritePin(RX_LED, GPIO_PIN_SET);
 	rx_off_time = HAL_GetTick() + LED_DURATION;
 }
 
-void handle_leds()
+inline void handle_leds()
 {
-	if (usb_off_time && (usb_off_time < HAL_GetTick()))
-	{
-		HAL_GPIO_WritePin(USB_LED, GPIO_PIN_RESET);
-		usb_off_time = 0;
-	}
-
 	if (tx_off_time && (tx_off_time < HAL_GetTick()))
 	{
 		HAL_GPIO_WritePin(TX_LED, GPIO_PIN_RESET);
@@ -328,3 +371,22 @@ void handle_leds()
 	}
 }
 
+
+//Callback
+FAST_RUN void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
+{
+	CAN_RxHeaderTypeDef hdr;
+	CAN_USB_Mess_t* mess = &can_rx_buf[can_rx_idx];
+	memset(mess->data, 0, sizeof(mess->data));
+
+	if (HAL_CAN_GetRxMessage(&hcan1, CAN_RX_FIFO0, &hdr, mess->data) != HAL_OK) return;
+
+	mess->id = hdr.IDE?hdr.ExtId:hdr.StdId;
+	mess->flags.ide = (hdr.IDE == CAN_ID_EXT)?1:0;
+	mess->flags.rtr = (hdr.RTR == CAN_RTR_REMOTE)?1:0;
+	mess->flags.dlc = hdr.DLC;
+	mess->filter = hdr.FilterMatchIndex;
+
+	if (can_rx_idx < CAN_BUF_SIZE)
+		can_rx_idx++;
+}

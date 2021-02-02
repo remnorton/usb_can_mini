@@ -31,7 +31,19 @@
 /* Private macro -------------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-/* Private variables ---------------------------------------------------------*/
+#pragma pack(1)
+
+typedef struct
+{
+	uint32_t	dwDTERate;
+	uint8_t		bCharFormat;
+	uint8_t		bParityType;
+	uint8_t		bDataBits;
+}LINE_Coding_t;
+
+#pragma pack()
+
+static LINE_Coding_t line_coding = {0,0,0,0};
 
 /* USER CODE END PV */
 
@@ -223,11 +235,13 @@ static int8_t CDC_Control_FS(uint8_t cmd, uint8_t* pbuf, uint16_t length)
   /* 6      | bDataBits  |   1   | Number Data bits (5, 6, 7, 8 or 16).          */
   /*******************************************************************************/
     case CDC_SET_LINE_CODING:
-
+    	if (length == sizeof(line_coding))
+    		memcpy(&line_coding, pbuf, length);
     break;
 
     case CDC_GET_LINE_CODING:
-
+    	if (length == sizeof(line_coding))
+    		memcpy(pbuf, &line_coding, length);
     break;
 
     case CDC_SET_CONTROL_LINE_STATE:
@@ -251,10 +265,11 @@ static int8_t CDC_Control_FS(uint8_t cmd, uint8_t* pbuf, uint16_t length)
   *         through this function.
   *
   *         @note
-  *         This function will block any OUT packet reception on USB endpoint
-  *         untill exiting this function. If you exit this function before transfer
-  *         is complete on CDC interface (ie. using DMA controller) it will result
-  *         in receiving more data while previous ones are still not sent.
+  *         This function will issue a NAK packet on any OUT packet received on
+  *         USB endpoint until exiting this function. If you exit this function
+  *         before transfer is complete on CDC interface (ie. using DMA controller)
+  *         it will result in receiving more data while previous ones are still
+  *         not sent.
   *
   * @param  Buf: Buffer of data to be received
   * @param  Len: Number of data received (in bytes)

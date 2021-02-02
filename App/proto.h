@@ -12,8 +12,6 @@
 #define _PREFIX_		0xF0
 
 
-typedef	uint16_t	crc_t;
-
 #pragma pack(1)
 
 //! header
@@ -24,16 +22,24 @@ typedef struct
 	uint8_t		datalen;
 }CAN_USB_Header_t;
 
+//! DLC & flags
+typedef struct
+{
+	uint8_t		dlc : 4;
+	uint8_t		ide : 1;
+	uint8_t		rtr : 1;
+}CAN_USB_Flags_t;
+
 //! message payload
 typedef struct
 {
-	uint32_t	id;
-	uint8_t		ide;
-	uint8_t		rtr;
-	uint8_t		dlc;
-	uint32_t    filter;
-	uint8_t		data[8];
+	uint32_t		id;
+	CAN_USB_Flags_t	flags;
+	uint8_t    		filter;
+	uint8_t			data[8];
 }CAN_USB_Mess_t;
+
+
 
 //! filter payload
 typedef struct
@@ -56,6 +62,10 @@ typedef struct
 enum
 {
 	CAN_BAUD_NONE = 0,
+	CAN_BAUD_10,
+	CAN_BAUD_20,
+	CAN_BAUD_25,
+	CAN_BAUD_50,
 	CAN_BAUD_100,
 	CAN_BAUD_125,
 	CAN_BAUD_200,
@@ -82,6 +92,5 @@ enum
 //
 //
 uint8_t make_usb_can_pck(uint8_t type, void* data, uint8_t len, uint8_t* out);
-crc_t calc_crc(void* data, uint8_t len);
 
 #endif /* PROTO_H_ */

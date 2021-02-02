@@ -11,6 +11,9 @@
 #include "stm32f1xx_hal.h"
 #include "stm32f1xx_hal_conf.h"
 
+//#define FAST_RUN
+#define FAST_RUN __attribute__ ((long_call, section (".code_ram")))
+
 extern CAN_HandleTypeDef hcan1;
 
 

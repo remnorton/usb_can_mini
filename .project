@@ -72,9 +72,34 @@
 	</natures>
 	<linkedResources>
 		<link>
-			<name>Libs/list</name>
+			<name>USB_Device_Library</name>
 			<type>2</type>
-			<locationURI>WORKSPACE_LOC/_common_libs/list</locationURI>
+			<locationURI>virtual:/virtual</locationURI>
+		</link>
+		<link>
+			<name>Libs/ring_buf</name>
+			<type>2</type>
+			<locationURI>WORKSPACE_LOC/_common_libs/ring_buf</locationURI>
+		</link>
+		<link>
+			<name>USB_Device_Library/usbd_cdc.c</name>
+			<type>1</type>
+			<locationURI>PARENT-2-PROJECT_LOC/Middlewares/ST/STM32_USB_Device_Library/Class/CDC/Src/usbd_cdc.c</locationURI>
+		</link>
+		<link>
+			<name>USB_Device_Library/usbd_core.c</name>
+			<type>1</type>
+			<locationURI>PARENT-2-PROJECT_LOC/Middlewares/ST/STM32_USB_Device_Library/Core/Src/usbd_core.c</locationURI>
+		</link>
+		<link>
+			<name>USB_Device_Library/usbd_ctlreq.c</name>
+			<type>1</type>
+			<locationURI>PARENT-2-PROJECT_LOC/Middlewares/ST/STM32_USB_Device_Library/Core/Src/usbd_ctlreq.c</locationURI>
+		</link>
+		<link>
+			<name>USB_Device_Library/usbd_ioreq.c</name>
+			<type>1</type>
+			<locationURI>PARENT-2-PROJECT_LOC/Middlewares/ST/STM32_USB_Device_Library/Core/Src/usbd_ioreq.c</locationURI>
 		</link>
 	</linkedResources>
 </projectDescription>
